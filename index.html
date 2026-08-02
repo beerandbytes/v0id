@@ -654,12 +654,12 @@
   <div class="toast" id="toast"></div>
 
   <dialog class="live-dialog" id="liveDialog">
-    <h2>Peer-to-peer live room</h2>
+    <h2>Start a live room</h2>
     <p id="liveStatus" class="live-status">Not connected</p>
-    <p>Host: create an offer and send it to a guest. Guest: paste the offer, create an answer, and return it. Host then pastes the answer. No backend is used.</p>
-    <div class="live-actions"><button id="createOffer" type="button">Create host offer</button><button id="acceptOffer" type="button">Accept guest offer</button></div>
-    <textarea id="liveCode" aria-label="Live room connection code" placeholder="Connection code appears here, or paste one here"></textarea>
-    <div class="live-actions"><button id="createAnswer" type="button">Create guest answer</button><button id="acceptAnswer" type="button">Accept host answer</button><button id="closeLive" type="button">Close</button></div>
+    <p>1. Host creates a link and sends it. 2. Guest opens it and shares back the response. 3. Host pastes the response to go live. No account or backend needed.</p>
+    <div class="live-actions"><button id="createOffer" type="button">1. Create share link</button><button id="copyLive" type="button">Copy</button></div>
+    <textarea id="liveCode" aria-label="Live room connection code" placeholder="Host: paste guest response here. Guest: your response appears here."></textarea>
+    <div class="live-actions"><button id="createAnswer" type="button">2. Join from host link</button><button id="acceptAnswer" type="button">3. Connect response</button><button id="closeLive" type="button">Close</button></div>
   </dialog>
 
   <script>
@@ -698,6 +698,7 @@
       liveStatus: document.querySelector("#liveStatus"),
       liveCode: document.querySelector("#liveCode"),
       createOffer: document.querySelector("#createOffer"),
+      copyLive: document.querySelector("#copyLive"),
       acceptOffer: document.querySelector("#acceptOffer"),
       createAnswer: document.querySelector("#createAnswer"),
       acceptAnswer: document.querySelector("#acceptAnswer"),
@@ -902,7 +903,10 @@
     }
 
     function decodeSignal(code){
-      try{return JSON.parse(decodeURIComponent(escape(atob(code.trim()))));}catch{return null;}
+      try{
+        const value = code.trim().includes("#live=") ? code.trim().split("#live=")[1] : code.trim();
+        return JSON.parse(decodeURIComponent(escape(atob(value))));
+      }catch{return null;}
     }
 
     function setLiveStatus(message){
@@ -963,6 +967,18 @@
       }
       applyingLiveState = false;
       toast("Live room synchronized");
+    }
+
+    async function createGuestAnswer(offer){
+      if(!offer || offer.type !== "offer") return toast("Open a valid host link first");
+      try{
+        const connection = makePeer();
+        await connection.setRemoteDescription(offer);
+        await connection.setLocalDescription(await connection.createAnswer());
+        await waitForIce();
+        els.liveCode.value = encodeSignal(connection.localDescription);
+        setLiveStatus("Response ready — copy it back to host");
+      }catch(error){ toast(error.message || "Could not join live room"); }
     }
 
 
@@ -1152,21 +1168,12 @@
         attachLiveChannel(connection.createDataChannel("cryo-live"));
         await connection.setLocalDescription(await connection.createOffer());
         await waitForIce();
-        els.liveCode.value = encodeSignal(connection.localDescription);
-        setLiveStatus("Host offer ready");
+        els.liveCode.value = `${location.href.split("#")[0]}#live=${encodeSignal(connection.localDescription)}`;
+        setLiveStatus("Share link ready — send it to a guest");
       }catch(error){ toast(error.message || "Could not create live offer"); }
     });
     els.createAnswer.addEventListener("click", async () => {
-      const offer = decodeSignal(els.liveCode.value);
-      if(!offer || offer.type !== "offer") return toast("Paste a valid host offer first");
-      try{
-        const connection = makePeer();
-        await connection.setRemoteDescription(offer);
-        await connection.setLocalDescription(await connection.createAnswer());
-        await waitForIce();
-        els.liveCode.value = encodeSignal(connection.localDescription);
-        setLiveStatus("Guest answer ready");
-      }catch(error){ toast(error.message || "Could not create guest answer"); }
+      await createGuestAnswer(decodeSignal(els.liveCode.value));
     });
     els.acceptAnswer.addEventListener("click", async () => {
       const answer = decodeSignal(els.liveCode.value);
@@ -1174,9 +1181,10 @@
       try{ await peer.setRemoteDescription(answer); setLiveStatus("Connecting live peer"); }
       catch(error){ toast(error.message || "Could not accept guest answer"); }
     });
-    els.acceptOffer.addEventListener("click", () => {
-      els.liveCode.value = "";
-      setLiveStatus("Paste host offer, then create answer");
+    els.copyLive.addEventListener("click", async () => {
+      if(!els.liveCode.value) return toast("Create a link or response first");
+      try{ await navigator.clipboard.writeText(els.liveCode.value); toast("Copied to clipboard"); }
+      catch{ els.liveCode.select(); toast("Select and copy this code"); }
     });
 
     els.prevBtn.addEventListener("click", previous);
@@ -1227,6 +1235,12 @@
 
     connectRoom();
     loadRoom();
+    if(typeof location !== "undefined" && location.hash.startsWith("#live=")){
+      if(typeof els.liveDialog.showModal === "function") els.liveDialog.showModal();
+      else els.liveDialog.setAttribute("open", "");
+      els.liveCode.value = location.href;
+      createGuestAnswer(decodeSignal(location.href));
+    }
   </script>
 </body>
 </html>
