@@ -322,6 +322,9 @@
     }
 
     .queue-item:hover{border-color:var(--line)}
+    .queue-item[draggable="true"]{cursor:grab}
+    .queue-item.dragging{opacity:.38; cursor:grabbing}
+    .queue-item.drop-target{border-color:var(--acid); background:rgba(233,255,0,.12)}
     .queue-item.active{
       border-color:var(--acid);
       background:rgba(233,255,0,.07);
@@ -384,6 +387,11 @@
       text-transform:uppercase;
       letter-spacing:.09em;
       font-size:11px;
+    }
+
+    .queue-list.drag-over{
+      outline:1px dashed var(--acid);
+      outline-offset:-8px;
     }
 
     .playerbar{
@@ -776,6 +784,8 @@
       state.tracks.forEach((track, index) => {
         const item = document.createElement("article");
         item.className = `queue-item ${index === state.currentIndex ? "active" : ""}`;
+        item.draggable = true;
+        item.dataset.index = index;
         item.innerHTML = `
           <img class="thumb" src="${track.thumb}" alt="">
           <div class="track-copy">
@@ -790,6 +800,23 @@
         `;
 
         item.addEventListener("dblclick", () => playIndex(index));
+        item.addEventListener("dragstart", event => {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", String(index));
+          item.classList.add("dragging");
+        });
+        item.addEventListener("dragend", () => item.classList.remove("dragging"));
+        item.addEventListener("dragover", event => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          item.classList.add("drop-target");
+        });
+        item.addEventListener("dragleave", () => item.classList.remove("drop-target"));
+        item.addEventListener("drop", event => {
+          event.preventDefault();
+          item.classList.remove("drop-target");
+          moveTrack(Number(event.dataTransfer.getData("text/plain")), index);
+        });
 
         item.querySelectorAll("button").forEach(button => {
           button.addEventListener("click", event => {
@@ -837,6 +864,19 @@
 
       persist();
       render();
+    }
+
+    function moveTrack(fromIndex, toIndex){
+      if(!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= state.tracks.length) return;
+      if(!Number.isInteger(toIndex) || toIndex < 0 || toIndex >= state.tracks.length || fromIndex === toIndex) return;
+      const [track] = state.tracks.splice(fromIndex, 1);
+      state.tracks.splice(toIndex, 0, track);
+      if(state.currentIndex === fromIndex) state.currentIndex = toIndex;
+      else if(fromIndex < state.currentIndex && toIndex >= state.currentIndex) state.currentIndex--;
+      else if(fromIndex > state.currentIndex && toIndex <= state.currentIndex) state.currentIndex++;
+      persist();
+      render();
+      toast("Track reordered");
     }
 
     function playIndex(index){
@@ -925,9 +965,8 @@
       toast.timer = setTimeout(() => els.toast.classList.remove("show"), 1800);
     }
 
-    els.addForm.addEventListener("submit", async event => {
-      event.preventDefault();
-      const id = extractYouTubeId(els.youtubeUrl.value);
+    async function addYouTubeLink(url){
+      const id = extractYouTubeId(url);
       if(!id) return toast("Invalid YouTube URL");
 
       const track = {
@@ -951,9 +990,48 @@
       if(state.currentIndex === -1) state.currentIndex = 0;
       persist();
       render();
-      els.youtubeUrl.value = "";
       toast("Track added to queue");
       if(state.tracks.length === 1) loadCurrent(false);
+      return true;
+    }
+
+    els.addForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const added = await addYouTubeLink(els.youtubeUrl.value);
+      if(added) els.youtubeUrl.value = "";
+    });
+
+    els.queueList.addEventListener("dragover", event => {
+      const droppedText = event.dataTransfer?.getData("text/plain") || "";
+      if(extractYouTubeId(droppedText)){
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        els.queueList.classList.add("drag-over");
+      }
+    });
+
+    els.queueList.addEventListener("dragleave", event => {
+      if(!els.queueList.contains(event.relatedTarget)) els.queueList.classList.remove("drag-over");
+    });
+
+    els.queueList.addEventListener("drop", async event => {
+      const droppedText = event.dataTransfer?.getData("text/plain") || "";
+      if(!extractYouTubeId(droppedText)) return;
+      event.preventDefault();
+      els.queueList.classList.remove("drag-over");
+      await addYouTubeLink(droppedText);
+    });
+
+    document.addEventListener("dragover", event => {
+      if(extractYouTubeId(event.dataTransfer?.getData("text/plain") || "")) event.preventDefault();
+    });
+
+    document.addEventListener("drop", async event => {
+      if(els.queueList.contains(event.target)) return;
+      const droppedText = event.dataTransfer?.getData("text/plain") || "";
+      if(!extractYouTubeId(droppedText)) return;
+      event.preventDefault();
+      await addYouTubeLink(droppedText);
     });
 
     els.joinRoom.addEventListener("click", () => {

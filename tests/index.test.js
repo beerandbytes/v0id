@@ -105,6 +105,7 @@ function createPage({ storage = {}, broadcastChannel = true, localStorage = true
   }
 
   context.document = {
+    addEventListener() {},
     querySelector: elementFor,
     createElement(tagName) {
       return new FakeElement(tagName);

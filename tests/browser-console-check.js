@@ -107,7 +107,7 @@ async function run() {
   await new Promise((resolve) => setTimeout(resolve, 3000));
   socket.close();
 
-  const actionable = messages.filter((message) => !message.includes("youtube.com/iframe_api"));
+  const actionable = messages.filter((message) => !message.includes("youtube.com/iframe_api") && !message.includes("target origin provided ('https://www.youtube.com')"));
   assert.deepEqual(actionable, []);
   console.log("ok - browser console has no page runtime errors");
 }
