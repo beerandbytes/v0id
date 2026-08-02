@@ -516,6 +516,14 @@
       transform:translateX(-50%) translateY(0);
     }
 
+    .live-dialog{width:min(620px,calc(100vw - 32px)); padding:22px; background:var(--panel); border:1px solid var(--line)}
+    .live-dialog::backdrop{background:rgba(0,0,0,.72)}
+    .live-dialog h2{margin:0 0 6px; font-size:25px; text-transform:uppercase}
+    .live-dialog p{color:var(--muted); font-size:12px}
+    .live-dialog textarea{width:100%; min-height:92px; resize:vertical; background:#090a0c; border:1px solid var(--line); color:var(--white); padding:9px; font:11px/1.4 monospace}
+    .live-actions{display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 18px}
+    .live-status{color:var(--acid)!important; text-transform:uppercase; letter-spacing:.08em}
+
     @media (max-width: 980px){
       body{overflow:auto}
       .app{height:auto; min-height:100%; grid-template-rows:auto auto auto}
@@ -565,6 +573,7 @@
       <div class="room">
         <input id="roomInput" type="text" value="ALPHA-01" aria-label="Room code">
         <button id="joinRoom" type="button">Join room</button>
+        <button id="liveRoom" type="button">Live link</button>
       </div>
     </header>
 
@@ -644,6 +653,15 @@
 
   <div class="toast" id="toast"></div>
 
+  <dialog class="live-dialog" id="liveDialog">
+    <h2>Peer-to-peer live room</h2>
+    <p id="liveStatus" class="live-status">Not connected</p>
+    <p>Host: create an offer and send it to a guest. Guest: paste the offer, create an answer, and return it. Host then pastes the answer. No backend is used.</p>
+    <div class="live-actions"><button id="createOffer" type="button">Create host offer</button><button id="acceptOffer" type="button">Accept guest offer</button></div>
+    <textarea id="liveCode" aria-label="Live room connection code" placeholder="Connection code appears here, or paste one here"></textarea>
+    <div class="live-actions"><button id="createAnswer" type="button">Create guest answer</button><button id="acceptAnswer" type="button">Accept host answer</button><button id="closeLive" type="button">Close</button></div>
+  </dialog>
+
   <script>
     /*
       CRYO//QUEUE prototype
@@ -668,10 +686,22 @@
     let playerReady = false;
     let progressTimer = null;
     let channel = null;
+    let peer = null;
+    let liveChannel = null;
+    let applyingLiveState = false;
 
     const els = {
       roomInput: document.querySelector("#roomInput"),
       joinRoom: document.querySelector("#joinRoom"),
+      liveRoom: document.querySelector("#liveRoom"),
+      liveDialog: document.querySelector("#liveDialog"),
+      liveStatus: document.querySelector("#liveStatus"),
+      liveCode: document.querySelector("#liveCode"),
+      createOffer: document.querySelector("#createOffer"),
+      acceptOffer: document.querySelector("#acceptOffer"),
+      createAnswer: document.querySelector("#createAnswer"),
+      acceptAnswer: document.querySelector("#acceptAnswer"),
+      closeLive: document.querySelector("#closeLive"),
       roomLabel: document.querySelector("#roomLabel"),
       queueCount: document.querySelector("#queueCount"),
       syncState: document.querySelector("#syncState"),
@@ -731,6 +761,7 @@
         // Storage can be disabled in private or embedded contexts.
       }
       if(emit && channel) channel.postMessage({ type:"state", payload });
+      if(emit) sendLiveState();
     }
 
     function readSavedRoom(){
@@ -865,6 +896,75 @@
       persist();
       render();
     }
+
+    function encodeSignal(description){
+      return btoa(unescape(encodeURIComponent(JSON.stringify(description))));
+    }
+
+    function decodeSignal(code){
+      try{return JSON.parse(decodeURIComponent(escape(atob(code.trim()))));}catch{return null;}
+    }
+
+    function setLiveStatus(message){
+      els.liveStatus.textContent = message;
+      els.syncState.textContent = message;
+    }
+
+    function waitForIce(){
+      return new Promise(resolve => {
+        if(peer.iceGatheringState === "complete") return resolve();
+        peer.addEventListener("icegatheringstatechange", () => {
+          if(peer.iceGatheringState === "complete") resolve();
+        }, { once:false });
+        setTimeout(resolve, 4000);
+      });
+    }
+
+    function makePeer(){
+      if(typeof RTCPeerConnection === "undefined") throw new Error("WebRTC is unavailable in this browser");
+      if(peer) peer.close();
+      peer = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+      peer.onconnectionstatechange = () => {
+        if(peer.connectionState === "connected") setLiveStatus("Live peer connected");
+        if(["failed","disconnected","closed"].includes(peer.connectionState)) setLiveStatus("Live peer disconnected");
+      };
+      peer.ondatachannel = event => attachLiveChannel(event.channel);
+      return peer;
+    }
+
+    function attachLiveChannel(nextChannel){
+      liveChannel = nextChannel;
+      liveChannel.onopen = () => { setLiveStatus("Live peer connected"); sendLiveState(); };
+      liveChannel.onclose = () => setLiveStatus("Live peer disconnected");
+      liveChannel.onmessage = event => {
+        try{ applyLiveState(JSON.parse(event.data)); }catch{ /* Ignore malformed peer data. */ }
+      };
+    }
+
+    function sendLiveState(){
+      if(!liveChannel || liveChannel.readyState !== "open" || applyingLiveState) return;
+      const position = playerReady && player?.getCurrentTime ? player.getCurrentTime() : 0;
+      liveChannel.send(JSON.stringify({type:"state", tracks:state.tracks, currentIndex:state.currentIndex, isPlaying:state.isPlaying, position}));
+    }
+
+    function applyLiveState(payload){
+      if(payload?.type !== "state" || !Array.isArray(payload.tracks)) return;
+      applyingLiveState = true;
+      state.tracks = payload.tracks;
+      state.currentIndex = Number.isInteger(payload.currentIndex) ? payload.currentIndex : -1;
+      state.isPlaying = Boolean(payload.isPlaying);
+      render();
+      persist(false);
+      loadCurrent(false);
+      if(playerReady && player && state.currentIndex >= 0){
+        const position = Number(payload.position) || 0;
+        player.seekTo(position, true);
+        if(state.isPlaying) player.playVideo(); else player.pauseVideo();
+      }
+      applyingLiveState = false;
+      toast("Live room synchronized");
+    }
+
 
     function moveTrack(fromIndex, toIndex){
       if(!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= state.tracks.length) return;
@@ -1041,6 +1141,44 @@
       toast(`Joined ${state.room}`);
     });
 
+    els.liveRoom.addEventListener("click", () => {
+      if(typeof els.liveDialog.showModal === "function") els.liveDialog.showModal();
+      else els.liveDialog.setAttribute("open", "");
+    });
+    els.closeLive.addEventListener("click", () => els.liveDialog.close?.());
+    els.createOffer.addEventListener("click", async () => {
+      try{
+        const connection = makePeer();
+        attachLiveChannel(connection.createDataChannel("cryo-live"));
+        await connection.setLocalDescription(await connection.createOffer());
+        await waitForIce();
+        els.liveCode.value = encodeSignal(connection.localDescription);
+        setLiveStatus("Host offer ready");
+      }catch(error){ toast(error.message || "Could not create live offer"); }
+    });
+    els.createAnswer.addEventListener("click", async () => {
+      const offer = decodeSignal(els.liveCode.value);
+      if(!offer || offer.type !== "offer") return toast("Paste a valid host offer first");
+      try{
+        const connection = makePeer();
+        await connection.setRemoteDescription(offer);
+        await connection.setLocalDescription(await connection.createAnswer());
+        await waitForIce();
+        els.liveCode.value = encodeSignal(connection.localDescription);
+        setLiveStatus("Guest answer ready");
+      }catch(error){ toast(error.message || "Could not create guest answer"); }
+    });
+    els.acceptAnswer.addEventListener("click", async () => {
+      const answer = decodeSignal(els.liveCode.value);
+      if(!peer || !answer || answer.type !== "answer") return toast("Paste a valid guest answer first");
+      try{ await peer.setRemoteDescription(answer); setLiveStatus("Connecting live peer"); }
+      catch(error){ toast(error.message || "Could not accept guest answer"); }
+    });
+    els.acceptOffer.addEventListener("click", () => {
+      els.liveCode.value = "";
+      setLiveStatus("Paste host offer, then create answer");
+    });
+
     els.prevBtn.addEventListener("click", previous);
     els.nextBtn.addEventListener("click", next);
     els.playBtn.addEventListener("click", togglePlayback);
@@ -1076,6 +1214,7 @@
           onStateChange(event){
             state.isPlaying = event.data === YT.PlayerState.PLAYING;
             updateNowPlaying();
+            if(!applyingLiveState) sendLiveState();
             if(event.data === YT.PlayerState.ENDED) next();
           }
         }
