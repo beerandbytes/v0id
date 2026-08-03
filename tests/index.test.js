@@ -222,6 +222,21 @@ test("shared tracks discard malformed IDs and unsafe thumbnail URLs", () => {
   }]);
 });
 
+test("only a host answers an initial live state request", () => {
+  const { context } = createPage();
+  const sent = [];
+  const testChannel = { readyState: "open", send(message) { sent.push(JSON.parse(message)); } };
+  context.attachLiveChannel(testChannel);
+
+  context.setLiveRole("guest");
+  testChannel.onmessage({ data: JSON.stringify({ type: "request-state" }) });
+  assert.deepEqual(sent, []);
+
+  context.setLiveRole("host");
+  testChannel.onmessage({ data: JSON.stringify({ type: "request-state" }) });
+  assert.equal(sent[0].type, "state");
+});
+
 test("malformed sync messages are ignored", () => {
   const { channels } = createPage();
 

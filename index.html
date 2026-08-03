@@ -691,6 +691,7 @@
     let peer = null;
     let liveChannel = null;
     let peerGeneration = 0;
+    let liveRole = null;
     let applyingLiveState = false;
 
     const els = {
@@ -942,6 +943,7 @@
 
     function setLiveRole(role){
       const guest = role === "guest";
+      liveRole = role;
       // Guests must be able to copy the generated answer back to the host.
       // Hiding the whole action group stranded them with no way to finish setup.
       els.hostActions.hidden = false;
@@ -998,14 +1000,19 @@
       liveChannel.onopen = () => {
         if(connection !== peer || nextChannel !== liveChannel) return;
         setLiveStatus("Live peer connected");
-        sendLiveState();
+        if(liveRole === "host") sendLiveState();
+        else liveChannel.send(JSON.stringify({type:"request-state"}));
       };
       liveChannel.onclose = () => {
         if(connection === peer && nextChannel === liveChannel) setLiveStatus("Live peer disconnected");
       };
       liveChannel.onmessage = event => {
         if(connection !== peer || nextChannel !== liveChannel) return;
-        try{ applyLiveState(JSON.parse(event.data)); }catch{ /* Ignore malformed peer data. */ }
+        try{
+          const payload = JSON.parse(event.data);
+          if(payload?.type === "request-state" && liveRole === "host") sendLiveState();
+          else applyLiveState(payload);
+        }catch{ /* Ignore malformed peer data. */ }
       };
     }
 
@@ -1120,9 +1127,13 @@
       const ytState = player?.getPlayerState?.();
       if(ytState === YT.PlayerState.PLAYING){
         player.pauseVideo();
+        state.isPlaying = false;
       }else{
         player.playVideo();
+        state.isPlaying = true;
       }
+      updateNowPlaying();
+      sendLiveState();
     }
 
     function formatTime(seconds){
@@ -1295,7 +1306,6 @@
           onStateChange(event){
             state.isPlaying = event.data === YT.PlayerState.PLAYING;
             updateNowPlaying();
-            if(!applyingLiveState) sendLiveState();
             if(event.data === YT.PlayerState.ENDED) next();
           }
         }
