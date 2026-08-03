@@ -657,7 +657,7 @@
     <h2>Start a live room</h2>
     <p id="liveStatus" class="live-status">Not connected</p>
     <p id="liveInstructions">Host: create a link, send it, then paste the guest response below. No account or backend needed.</p>
-    <div id="hostActions" class="live-actions"><button id="createOffer" type="button">1. Create share link</button><button id="copyLive" type="button">Copy link</button></div>
+    <div id="hostActions" class="live-actions"><button id="createOffer" type="button">1. Create share link</button><button id="copyLive" type="button">Copy link / response</button></div>
     <textarea id="hostLink" aria-label="Host live room link" readonly placeholder="Your share link appears here"></textarea>
     <textarea id="liveCode" aria-label="Live room connection code" placeholder="Paste guest response here"></textarea>
     <div class="live-actions"><button id="createAnswer" type="button">Join pasted host link</button><button id="acceptAnswer" type="button">2. Connect guest response</button><button id="closeLive" type="button">Close</button></div>
@@ -675,6 +675,7 @@
     */
 
     const EMPTY_THUMB = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+    const MAX_SHARED_TRACKS = 100;
 
     const state = {
       room: "ALPHA-01",
@@ -689,6 +690,7 @@
     let channel = null;
     let peer = null;
     let liveChannel = null;
+    let peerGeneration = 0;
     let applyingLiveState = false;
 
     const els = {
@@ -751,6 +753,19 @@
       return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
     }
 
+    function normalizeTracks(tracks){
+      if(!Array.isArray(tracks)) return [];
+      return tracks
+        .filter(track => track && typeof track.id === "string" && /^[A-Za-z0-9_-]{11}$/.test(track.id))
+        .slice(0, MAX_SHARED_TRACKS)
+        .map(track => ({
+          id: track.id,
+          title: typeof track.title === "string" ? track.title.slice(0, 300) : trackLabel(track.id),
+          thumb: thumbnailFor(track.id),
+          addedAt: Number.isFinite(track.addedAt) ? track.addedAt : Date.now()
+        }));
+    }
+
     function trackLabel(id){
       return `YouTube transmission ${id}`;
     }
@@ -780,9 +795,10 @@
 
     function loadRoom(){
       const saved = readSavedRoom();
-      state.tracks = Array.isArray(saved?.tracks) ? saved.tracks : [];
+      state.tracks = normalizeTracks(saved?.tracks);
       state.currentIndex = Number.isInteger(saved?.currentIndex) ? saved.currentIndex : -1;
       if(state.currentIndex >= state.tracks.length) state.currentIndex = state.tracks.length - 1;
+      if(state.currentIndex < -1) state.currentIndex = -1;
       render();
       loadCurrent(false);
     }
@@ -798,8 +814,10 @@
       channel.onmessage = event => {
         const payload = event.data?.payload;
         if(event.data?.type !== "state" || !payload) return;
-        state.tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+        state.tracks = normalizeTracks(payload.tracks);
         state.currentIndex = Number.isInteger(payload.currentIndex) ? payload.currentIndex : -1;
+        if(state.currentIndex >= state.tracks.length) state.currentIndex = state.tracks.length - 1;
+        if(state.currentIndex < -1) state.currentIndex = -1;
         render();
         loadCurrent(false);
         toast("Room state synchronized");
@@ -903,13 +921,17 @@
     }
 
     function encodeSignal(description){
-      return btoa(unescape(encodeURIComponent(JSON.stringify(description))));
+      return btoa(unescape(encodeURIComponent(JSON.stringify(description))))
+        .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
     }
 
     function decodeSignal(code){
       try{
-        const value = code.trim().includes("#live=") ? code.trim().split("#live=")[1] : code.trim();
-        return JSON.parse(decodeURIComponent(escape(atob(value))));
+        const raw = code.trim();
+        const value = raw.includes("#live=") ? raw.slice(raw.indexOf("#live=") + 6) : raw;
+        const base64 = value.replaceAll("-", "+").replaceAll("_", "/") + "===".slice((value.length + 3) % 4);
+        const description = JSON.parse(decodeURIComponent(escape(atob(base64))));
+        return description && typeof description.sdp === "string" && ["offer", "answer"].includes(description.type) ? description : null;
       }catch{return null;}
     }
 
@@ -920,7 +942,11 @@
 
     function setLiveRole(role){
       const guest = role === "guest";
-      els.hostActions.hidden = guest;
+      // Guests must be able to copy the generated answer back to the host.
+      // Hiding the whole action group stranded them with no way to finish setup.
+      els.hostActions.hidden = false;
+      els.createOffer.hidden = guest;
+      els.copyLive.hidden = false;
       els.hostLink.hidden = guest;
       els.acceptAnswer.hidden = guest;
       els.createAnswer.hidden = true;
@@ -933,33 +959,52 @@
       }
     }
 
-    function waitForIce(){
+    function waitForIce(connection, timeout = 8000){
       return new Promise(resolve => {
-        if(peer.iceGatheringState === "complete") return resolve();
-        peer.addEventListener("icegatheringstatechange", () => {
-          if(peer.iceGatheringState === "complete") resolve();
-        }, { once:false });
-        setTimeout(resolve, 4000);
+        if(connection.iceGatheringState === "complete") return resolve();
+        const finish = () => {
+          clearTimeout(timer);
+          connection.removeEventListener("icegatheringstatechange", onChange);
+          resolve();
+        };
+        const onChange = () => {
+          if(connection.iceGatheringState === "complete") finish();
+        };
+        const timer = setTimeout(finish, timeout);
+        connection.addEventListener("icegatheringstatechange", onChange);
       });
     }
 
     function makePeer(){
       if(typeof RTCPeerConnection === "undefined") throw new Error("WebRTC is unavailable in this browser");
       if(peer) peer.close();
-      peer = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
-      peer.onconnectionstatechange = () => {
-        if(peer.connectionState === "connected") setLiveStatus("Live peer connected");
-        if(["failed","disconnected","closed"].includes(peer.connectionState)) setLiveStatus("Live peer disconnected");
+      if(liveChannel) liveChannel.close();
+      liveChannel = null;
+      const generation = ++peerGeneration;
+      const connection = peer = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+      connection.onconnectionstatechange = () => {
+        if(connection !== peer || generation !== peerGeneration) return;
+        if(connection.connectionState === "connected") setLiveStatus("Live peer connected");
+        if(["failed","disconnected","closed"].includes(connection.connectionState)) setLiveStatus("Live peer disconnected");
       };
-      peer.ondatachannel = event => attachLiveChannel(event.channel);
-      return peer;
+      connection.ondatachannel = event => {
+        if(connection === peer && generation === peerGeneration) attachLiveChannel(event.channel, connection);
+      };
+      return connection;
     }
 
-    function attachLiveChannel(nextChannel){
+    function attachLiveChannel(nextChannel, connection = peer){
       liveChannel = nextChannel;
-      liveChannel.onopen = () => { setLiveStatus("Live peer connected"); sendLiveState(); };
-      liveChannel.onclose = () => setLiveStatus("Live peer disconnected");
+      liveChannel.onopen = () => {
+        if(connection !== peer || nextChannel !== liveChannel) return;
+        setLiveStatus("Live peer connected");
+        sendLiveState();
+      };
+      liveChannel.onclose = () => {
+        if(connection === peer && nextChannel === liveChannel) setLiveStatus("Live peer disconnected");
+      };
       liveChannel.onmessage = event => {
+        if(connection !== peer || nextChannel !== liveChannel) return;
         try{ applyLiveState(JSON.parse(event.data)); }catch{ /* Ignore malformed peer data. */ }
       };
     }
@@ -973,8 +1018,8 @@
     function applyLiveState(payload){
       if(payload?.type !== "state" || !Array.isArray(payload.tracks)) return;
       applyingLiveState = true;
-      state.tracks = payload.tracks;
-      state.currentIndex = Number.isInteger(payload.currentIndex) ? payload.currentIndex : -1;
+      state.tracks = normalizeTracks(payload.tracks);
+      state.currentIndex = Number.isInteger(payload.currentIndex) && payload.currentIndex >= 0 && payload.currentIndex < state.tracks.length ? payload.currentIndex : -1;
       state.isPlaying = Boolean(payload.isPlaying);
       render();
       persist(false);
@@ -995,7 +1040,7 @@
         const connection = makePeer();
         await connection.setRemoteDescription(offer);
         await connection.setLocalDescription(await connection.createAnswer());
-        await waitForIce();
+        await waitForIce(connection);
         els.liveCode.value = encodeSignal(connection.localDescription);
         setLiveStatus("Response ready — copy it back to host");
       }catch(error){ toast(error.message || "Could not join live room"); }
@@ -1056,7 +1101,12 @@
 
     function loadCurrent(autoplay = false){
       const track = state.tracks[state.currentIndex];
-      if(!track || !playerReady || !player) return;
+      if(!track){
+        if(playerReady && player?.stopVideo) player.stopVideo();
+        updateNowPlaying();
+        return;
+      }
+      if(!playerReady || !player) return;
       if(autoplay) player.loadVideoById(track.id);
       else player.cueVideoById(track.id);
       player.setVolume(Number(els.volume.value));
@@ -1187,9 +1237,9 @@
       try{
         setLiveRole("host");
         const connection = makePeer();
-        attachLiveChannel(connection.createDataChannel("cryo-live"));
+        attachLiveChannel(connection.createDataChannel("cryo-live"), connection);
         await connection.setLocalDescription(await connection.createOffer());
-        await waitForIce();
+        await waitForIce(connection);
         els.hostLink.value = `${location.href.split("#")[0]}#live=${encodeSignal(connection.localDescription)}`;
         setLiveStatus("Share link ready — send it to a guest");
       }catch(error){ toast(error.message || "Could not create live offer"); }
@@ -1204,7 +1254,7 @@
       catch(error){ toast(error.message || "Could not accept guest answer"); }
     });
     els.copyLive.addEventListener("click", async () => {
-      const value = els.hostLink.value || els.liveCode.value;
+      const value = els.createOffer.hidden ? els.liveCode.value : (els.hostLink.value || els.liveCode.value);
       if(!value) return toast("Create a link or response first");
       try{ await navigator.clipboard.writeText(value); toast("Copied to clipboard"); }
       catch{ (els.hostLink.value ? els.hostLink : els.liveCode).select(); toast("Select and copy this code"); }

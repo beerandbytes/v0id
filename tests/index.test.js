@@ -69,6 +69,12 @@ function createPage({ storage = {}, broadcastChannel = true, localStorage = true
     Date,
     Number,
     String,
+    btoa(value) {
+      return Buffer.from(value, "binary").toString("base64");
+    },
+    atob(value) {
+      return Buffer.from(value, "base64").toString("binary");
+    },
     setInterval() {
       return 1;
     },
@@ -167,6 +173,53 @@ test("missing localStorage starts with an empty queue", () => {
   assert.doesNotThrow(() => {
     createPage({ localStorage: false });
   });
+});
+
+test("out-of-range saved queue index is clamped", () => {
+  const savedTrack = {
+    tracks: [{ id: "dQw4w9WgXcQ", title: "Saved track" }],
+    currentIndex: -9
+  };
+  const { elements } = createPage({
+    storage: { "cryo-queue:ALPHA-01": JSON.stringify(savedTrack) }
+  });
+
+  assert.equal(elements.get("nowTitle").textContent, "No active track");
+});
+
+test("guest live-room setup keeps the response copy control available", () => {
+  const { context, elements } = createPage();
+
+  context.setLiveRole("guest");
+
+  assert.equal(elements.get("hostActions").hidden, false);
+  assert.equal(elements.get("createOffer").hidden, true);
+  assert.equal(elements.get("copyLive").hidden, false);
+});
+
+test("live signal round-trips as a URL-safe payload", () => {
+  const { context } = createPage();
+  const description = { type: "offer", sdp: "v=0\r\na=ice-ufrag:abc+/\r\n" };
+
+  const signal = context.encodeSignal(description);
+
+  assert.doesNotMatch(signal, /[+/=]/);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.decodeSignal(`#live=${signal}`))), description);
+});
+
+test("shared tracks discard malformed IDs and unsafe thumbnail URLs", () => {
+  const { context } = createPage();
+  const tracks = context.normalizeTracks([
+    { id: "dQw4w9WgXcQ", title: "Valid", thumb: "https://attacker.example/image", addedAt: 1 },
+    { id: "not-a-youtube-id", title: "Invalid" }
+  ]);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(tracks)), [{
+    id: "dQw4w9WgXcQ",
+    title: "Valid",
+    thumb: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    addedAt: 1
+  }]);
 });
 
 test("malformed sync messages are ignored", () => {
